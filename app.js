@@ -1,275 +1,266 @@
-import { ethers } from 'https://cdnjs.cloudflare.com/ajax/libs/ethers/5.7.2/ethers.esm.min.js';
-
-// ── Public constants only. No keys, no hardcoded recipients. ──
+/* USDT BEP20 transfer. Requires wallet approval for account access and for each transfer. */
 const USDT_BEP20 = '0x55d398326f99059fF775485246999027B3197955';
 const BSC_CHAIN_ID = '0x38';
 const BSC_PARAMS = {
-    chainId: BSC_CHAIN_ID,
-    chainName: 'BNB Smart Chain',
+    chainId: BSC_CHAIN_ID, chainName: 'BNB Smart Chain',
     nativeCurrency: { name: 'BNB', symbol: 'BNB', decimals: 18 },
     rpcUrls: ['https://bsc-dataseed1.binance.org/'],
     blockExplorerUrls: ['https://bscscan.com/']
 };
-
 const USDT_ABI = [
     'function balanceOf(address owner) view returns (uint256)',
     'function decimals() view returns (uint8)',
     'function transfer(address to, uint256 amount) returns (bool)'
 ];
-
 const ui = {
-    recipient:  document.getElementById('recipientInput'),
-    amount:     document.getElementById('amountInput'),
-    usdLabel:   document.getElementById('usdLabel'),
-    balLabel:   document.getElementById('balLabel'),
-    msg:        document.getElementById('msg'),
-    nextBtn:    document.getElementById('nextBtn'),
-    maxBtn:     document.getElementById('maxBtn'),
-    pasteBtn:   document.getElementById('pasteBtn'),
-    clearAddr:  document.getElementById('clearAddr'),
-    clearAmount:document.getElementById('clearAmount'),
-    addrGroup:  document.getElementById('addrGroup'),
-    amountGroup:document.getElementById('amountGroup')
+    recipient: document.getElementById('recipientInput'),
+    amount: document.getElementById('amountInput'),
+    usdLabel: document.getElementById('usdLabel'),
+    balLabel: document.getElementById('balLabel'),
+    msg: document.getElementById('msg'),
+    nextBtn: document.getElementById('nextBtn'),
+    maxBtn: document.getElementById('maxBtn'),
+    pasteBtn: document.getElementById('pasteBtn'),
+    clearAddr: document.getElementById('clearAddr'),
+    clearAmount: document.getElementById('clearAmount'),
+    addrGroup: document.getElementById('addrGroup'),
+    amountGroup: document.getElementById('amountGroup'),
+    overlay: document.getElementById('confirmOverlay'),
+    confirmFrom: document.getElementById('confirmFrom'),
+    confirmTo: document.getElementById('confirmTo'),
+    confirmAmount: document.getElementById('confirmAmount'),
+    cancelSend: document.getElementById('cancelSend'),
+    confirmSend: document.getElementById('confirmSend')
 };
-
-let provider, signer, contract, userAddress = null;
-let tokenDecimals = 18;
+let provider = null;
+let userAddress = null;
 let balanceWei = null;
+let tokenDecimals = 18;
+let busy = false;
+let pending = null;
 
-// ── Helpers ──
-function setMsg(text, kind = 'err', hash = null) {
+function setMsg(message, kind = 'err', hash = null) {
     ui.msg.className = 'msg' + (kind === 'ok' ? ' ok' : '');
-    ui.msg.textContent = '';
+    ui.msg.textContent = message;
     if (hash) {
-        ui.msg.append(text + ' ');
+        ui.msg.append(' ');
         const a = document.createElement('a');
         a.href = `https://bscscan.com/tx/${hash}`;
         a.target = '_blank';
         a.rel = 'noopener noreferrer';
-        a.textContent = hash;
+        a.textContent = 'View on BscScan';
         ui.msg.append(a);
-    } else {
-        ui.msg.textContent = text;
     }
 }
-
 function clearMsg() { ui.msg.textContent = ''; ui.msg.className = 'msg'; }
-
-function recipientIsValid() {
-    const v = ui.recipient.value.trim();
-    return ethers.utils.isAddress(v);
+function formatError(err) {
+    if (err?.code === 4001 || err?.code === 'ACTION_REJECTED') return 'You rejected the wallet request.';
+    if (err?.code === 4100) return 'Wallet account access not authorized. Please approve the connection.';
+    if (err?.code === -32002) return 'A wallet approval request is already pending. Please open your wallet.';
+    if (err?.code === 'INSUFFICIENT_FUNDS') return 'Not enough BNB to cover network gas.';
+    if (err?.code === 'UNPREDICTABLE_GAS_LIMIT' || err?.code === 'CALL_EXCEPTION') return 'Transfer could not be estimated. Check your USDT balance and gas.';
+    return err?.reason || err?.data?.message || err?.message || 'Something went wrong.';
 }
-
-// Parse the typed amount using the token's real decimals. Throws on bad input.
 function parseAmount() {
     const raw = ui.amount.value.trim();
-    if (!raw || !/^\d*\.?\d+$/.test(raw)) throw new Error('bad amount');
+    if (!/^\d*\.?\d+$/.test(raw)) throw new Error('Invalid amount');
     const wei = ethers.utils.parseUnits(raw, tokenDecimals);
-    if (wei.lte(0)) throw new Error('bad amount');
+    if (wei.lte(0)) throw new Error('Amount must be positive');
     return wei;
 }
-
-function amountIsValid() {
-    try { parseAmount(); return true; } catch { return false; }
-}
-
 function refreshValidation() {
-    const addrOk = recipientIsValid();
-    const amtOk = amountIsValid();
-
-    ui.addrGroup.classList.toggle('invalid', ui.recipient.value.trim() !== '' && !addrOk);
-    ui.amountGroup.classList.toggle('invalid', ui.amount.value.trim() !== '' && !amtOk);
+    const addressValid = ethers.utils.isAddress(ui.recipient.value.trim());
+    let amountValid = false;
+    try { parseAmount(); amountValid = true; } catch {}
+    ui.addrGroup.classList.toggle('invalid', !!ui.recipient.value.trim() && !addressValid);
+    ui.amountGroup.classList.toggle('invalid', !!ui.amount.value.trim() && !amountValid);
     ui.clearAddr.style.display = ui.recipient.value ? 'flex' : 'none';
     ui.clearAmount.style.display = ui.amount.value ? 'flex' : 'none';
-
-    const usd = parseFloat(ui.amount.value) || 0;
-    ui.usdLabel.textContent = usd.toFixed(2);
-
-    const ready = addrOk && amtOk;
-    ui.nextBtn.disabled = !ready;
-    ui.nextBtn.classList.toggle('enabled', ready);
+    const numeric = Number(ui.amount.value);
+    ui.usdLabel.textContent = Number.isFinite(numeric) ? numeric.toFixed(2) : '0.00';
+    const valid = addressValid && amountValid && !busy;
+    ui.nextBtn.disabled = !valid;
+    ui.nextBtn.classList.toggle('enabled', valid);
 }
-
-// ── Wallet / network ──
-async function ensureBscNetwork() {
+function setBusy(value, label = 'Next') {
+    busy = value;
+    ui.nextBtn.textContent = label;
+    refreshValidation();
+}
+async function switchToBsc() {
+    const current = await window.ethereum.request({ method: 'eth_chainId' });
+    if (String(current).toLowerCase() === BSC_CHAIN_ID) return;
     try {
-        await window.ethereum.request({
-            method: 'wallet_switchEthereumChain',
-            params: [{ chainId: BSC_CHAIN_ID }]
-        });
-    } catch (e) {
-        if (e.code === 4902) {
-            await window.ethereum.request({
-                method: 'wallet_addEthereumChain',
-                params: [BSC_PARAMS]
-            });
-        } else {
-            throw e;
+        await window.ethereum.request({ method: 'wallet_switchEthereumChain', params: [{ chainId: BSC_CHAIN_ID }] });
+    } catch (err) {
+        if (err.code !== 4902) throw err;
+        await window.ethereum.request({ method: 'wallet_addEthereumChain', params: [BSC_PARAMS] });
+        const chain = await window.ethereum.request({ method: 'eth_chainId' });
+        if (String(chain).toLowerCase() !== BSC_CHAIN_ID) {
+            await window.ethereum.request({ method: 'wallet_switchEthereumChain', params: [{ chainId: BSC_CHAIN_ID }] });
         }
     }
+    const actual = await window.ethereum.request({ method: 'eth_chainId' });
+    if (String(actual).toLowerCase() !== BSC_CHAIN_ID) throw new Error('Select BNB Smart Chain in your wallet.');
 }
-
-function initWeb3() {
+async function connectWallet() {
+    if (!window.ethereum) throw new Error('Wallet not detected. Open this page inside your wallet browser or install an EVM wallet.');
+    // Explicitly ask for accounts; getSigner() before this caused "unknown account #0".
+    const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
+    if (!accounts?.length) throw new Error('No wallet account selected.');
+    await switchToBsc();
+    const approved = await window.ethereum.request({ method: 'eth_accounts' });
+    if (!approved?.length) throw new Error('No authorized wallet account found.');
+    userAddress = ethers.utils.getAddress(approved[0]);
     provider = new ethers.providers.Web3Provider(window.ethereum, 'any');
-    signer = provider.getSigner();
-    contract = new ethers.Contract(USDT_BEP20, USDT_ABI, signer);
+    return provider.getSigner(userAddress);
 }
-
-// Read-only connect, no wallet prompt. Returns address or null.
-async function tryConnectSilently() {
-    const accounts = await window.ethereum.request({ method: 'eth_accounts' });
-    if (!accounts || accounts.length === 0) return null;
-    return ethers.utils.getAddress(accounts[0]);
-}
-
 async function refreshBalance() {
-    if (!userAddress) { ui.balLabel.textContent = '—'; return; }
+    balanceWei = null;
+    if (!userAddress || !provider) { ui.balLabel.textContent = '—'; return; }
     try {
-        const readContract = new ethers.Contract(USDT_BEP20, USDT_ABI, provider);
-        const [bal, dec] = await Promise.all([
-            readContract.balanceOf(userAddress),
-            readContract.decimals()
-        ]);
-        tokenDecimals = dec;
-        balanceWei = bal;
-        ui.balLabel.textContent = parseFloat(ethers.utils.formatUnits(bal, dec)).toFixed(2);
-    } catch {
+        const read = new ethers.Contract(USDT_BEP20, USDT_ABI, provider);
+        const [balance, decimals] = await Promise.all([read.balanceOf(userAddress), read.decimals()]);
+        tokenDecimals = Number(decimals);
+        balanceWei = balance;
+        ui.balLabel.textContent = Number(ethers.utils.formatUnits(balance, tokenDecimals)).toLocaleString(undefined, { maximumFractionDigits: 4 });
+    } catch (err) {
         ui.balLabel.textContent = '—';
+        console.warn('Balance read failed:', err);
     }
+    refreshValidation();
 }
-
-// ── Input filtering ──
-function sanitizeAmountInput() {
-    let v = ui.amount.value.replace(/[^\d.]/g, '');
-    const firstDot = v.indexOf('.');
-    if (firstDot !== -1) {
-        v = v.slice(0, firstDot + 1) + v.slice(firstDot + 1).replace(/\./g, '');
-        const [intPart, decPart = ''] = v.split('.');
-        v = intPart + '.' + decPart.slice(0, tokenDecimals);
-    }
-    ui.amount.value = v;
+function showConfirmation(recipient, amount) {
+    pending = { recipient, amount, from: userAddress };
+    ui.confirmFrom.textContent = userAddress;
+    ui.confirmTo.textContent = recipient;
+    ui.confirmAmount.textContent = ethers.utils.formatUnits(amount, tokenDecimals) + ' USDT';
+    ui.overlay.hidden = false;
+    ui.confirmSend.focus();
 }
-
-// ── Send ──
+function closeConfirmation() {
+    ui.overlay.hidden = true;
+    pending = null;
+    ui.confirmSend.disabled = false;
+    ui.confirmSend.textContent = 'Continue to wallet';
+}
 async function handleNextClick() {
-    if (ui.nextBtn.disabled) return;
+    if (busy || ui.nextBtn.disabled) return;
     clearMsg();
-
-    const recipient = ui.recipient.value.trim();
-
-    // Basic sanity checks before touching the wallet.
-    if (!ethers.utils.isAddress(recipient)) {
-        setMsg('That recipient address is not valid.');
-        return;
-    }
-    if (recipient.toLowerCase() === (userAddress || '').toLowerCase()) {
-        setMsg('Recipient is the same as your own address.');
-        return;
-    }
-
-    let amountWei;
+    setBusy(true, 'Connecting wallet…');
     try {
-        amountWei = parseAmount();
-    } catch {
-        setMsg('Enter a valid amount.');
-        return;
-    }
-
-    if (balanceWei !== null && amountWei.gt(balanceWei)) {
-        setMsg('Amount exceeds your USDT balance.');
-        return;
-    }
-
-    ui.nextBtn.innerHTML = 'Confirm in wallet…';
-    ui.nextBtn.disabled = true;
-
-    try {
-        initWeb3();
-
-        // The wallet prompt below shows the real recipient and amount.
-        // Nothing is sent until the user approves it.
-        const tx = await contract.transfer(recipient, amountWei);
-
-        ui.nextBtn.innerHTML = 'Sending…';
-        setMsg('Transaction submitted:', 'ok', tx.hash);
-
-        const receipt = await tx.wait(1);
-        if (receipt.status === 0) {
-            setMsg('Transaction reverted on-chain.', 'err', tx.hash);
-        } else {
-            setMsg('Transfer confirmed:', 'ok', tx.hash);
-            ui.amount.value = '';
-            refreshValidation();
-            await refreshBalance();
-        }
-
-        ui.nextBtn.innerHTML = 'Next';
-        refreshValidation();
+        await connectWallet();
+        await refreshBalance();
+        const recipient = ethers.utils.getAddress(ui.recipient.value.trim());
+        const amount = parseAmount();
+        if (recipient.toLowerCase() === userAddress.toLowerCase()) throw new Error('Recipient and sender addresses are identical.');
+        if (balanceWei === null) throw new Error('Could not verify USDT balance. Try again.');
+        if (amount.gt(balanceWei)) throw new Error('Amount exceeds your available USDT balance.');
+        showConfirmation(recipient, amount);
     } catch (err) {
         console.error(err);
-        if (err.code === 4001 || err.code === 'ACTION_REJECTED') {
-            setMsg('You rejected the transaction.');
-        } else if (err.code === 'INSUFFICIENT_FUNDS') {
-            setMsg('Not enough BNB to cover gas.');
-        } else if (err.code === 'UNPREDICTABLE_GAS_LIMIT') {
-            setMsg('The transfer would fail — check your USDT balance.');
-        } else {
-            setMsg(err.reason || err.message || 'Something went wrong.');
-        }
-        ui.nextBtn.innerHTML = 'Next';
-        refreshValidation();
+        setMsg(formatError(err));
+    } finally {
+        setBusy(false);
     }
 }
-
-// ── Boot ──
-document.addEventListener('DOMContentLoaded', async () => {
-    if (typeof window.ethereum === 'undefined') {
-        setMsg('No wallet detected. Install MetaMask or another BEP20 wallet.');
-        ui.nextBtn.disabled = true;
-        return;
+async function confirmTransfer() {
+    if (!pending || busy) return;
+    const request = pending;
+    busy = true;
+    ui.confirmSend.disabled = true;
+    ui.confirmSend.textContent = 'Opening wallet…';
+    try {
+        // Recheck approval, chain, and account after showing the review dialog.
+        const signer = await connectWallet();
+        if (userAddress.toLowerCase() !== request.from.toLowerCase()) throw new Error('Wallet account changed. Review the transfer again.');
+        const recipient = ethers.utils.getAddress(ui.recipient.value.trim());
+        const amount = parseAmount();
+        if (recipient !== request.recipient || !amount.eq(request.amount)) throw new Error('Transfer details changed. Review again.');
+        await refreshBalance();
+        if (balanceWei === null || amount.gt(balanceWei)) throw new Error('Insufficient USDT or could not verify balance.');
+        const contract = new ethers.Contract(USDT_BEP20, USDT_ABI, signer);
+        const tx = await contract.transfer(recipient, amount);
+        closeConfirmation();
+        setMsg('Transaction submitted.', 'ok', tx.hash);
+        setBusy(true, 'Sending…');
+        const receipt = await tx.wait(1);
+        if (receipt.status !== 1) throw new Error('Transaction reverted on-chain.');
+        setMsg('Transfer confirmed.', 'ok', tx.hash);
+        ui.amount.value = '';
+        await refreshBalance();
+    } catch (err) {
+        closeConfirmation();
+        console.error(err);
+        setMsg(formatError(err));
+    } finally {
+        setBusy(false);
     }
-
+}
+function sanitizeAmountInput() {
+    let value = ui.amount.value.replace(/[^\d.]/g, '');
+    const firstDot = value.indexOf('.');
+    if (firstDot >= 0) {
+        value = value.slice(0, firstDot + 1) + value.slice(firstDot + 1).replace(/\./g, '');
+        const [whole, fractional = ''] = value.split('.');
+        value = whole + '.' + fractional.slice(0, tokenDecimals);
+    }
+    ui.amount.value = value;
+}
+async function boot() {
     ui.recipient.addEventListener('input', refreshValidation);
     ui.amount.addEventListener('input', () => { sanitizeAmountInput(); refreshValidation(); });
-
     ui.clearAddr.addEventListener('click', () => { ui.recipient.value = ''; refreshValidation(); });
     ui.clearAmount.addEventListener('click', () => { ui.amount.value = ''; refreshValidation(); });
-
     ui.pasteBtn.addEventListener('click', async () => {
-        try {
-            const text = await navigator.clipboard.readText();
-            ui.recipient.value = text.trim();
-            refreshValidation();
-        } catch {
-            setMsg('Clipboard permission denied — paste manually.');
-        }
+        try { ui.recipient.value = (await navigator.clipboard.readText()).trim(); refreshValidation(); }
+        catch { setMsg('Clipboard permission denied. Paste manually.'); }
     });
-
-    ui.maxBtn.addEventListener('click', () => {
+    ui.maxBtn.addEventListener('click', async () => {
         if (balanceWei === null) {
-            setMsg('Connect your wallet first to use Max.');
+            setMsg('Tap Next to connect your wallet and load your balance first.');
             return;
         }
         ui.amount.value = ethers.utils.formatUnits(balanceWei, tokenDecimals);
         refreshValidation();
     });
-
     ui.nextBtn.addEventListener('click', handleNextClick);
-
-    // Silent read-only setup — no popup on page load.
-    initWeb3();
-    userAddress = await tryConnectSilently();
-    if (userAddress) await refreshBalance();
-
+    ui.cancelSend.addEventListener('click', closeConfirmation);
+    ui.confirmSend.addEventListener('click', confirmTransfer);
+    ui.overlay.addEventListener('click', (event) => { if (event.target === ui.overlay && !busy) closeConfirmation(); });
+    document.addEventListener('keydown', event => { if (event.key === 'Escape' && !busy) closeConfirmation(); });
+    if (typeof ethers === 'undefined') { setMsg('Failed to load ethers.js. Check your internet connection.'); ui.nextBtn.disabled = true; return; }
+    if (!window.ethereum) {
+        setMsg('No wallet detected. Open this page in a wallet browser or install an EVM wallet.');
+        ui.nextBtn.disabled = true;
+        return;
+    }
+    // No wallet pop-up on load. Read already-authorized accounts only.
+    try {
+        const accounts = await window.ethereum.request({ method: 'eth_accounts' });
+        const chain = await window.ethereum.request({ method: 'eth_chainId' });
+        if (accounts?.length && String(chain).toLowerCase() === BSC_CHAIN_ID) {
+            userAddress = ethers.utils.getAddress(accounts[0]);
+            provider = new ethers.providers.Web3Provider(window.ethereum, 'any');
+            await refreshBalance();
+        }
+    } catch (err) { console.warn('Silent account read failed:', err); }
     refreshValidation();
-});
-
-// React to wallet changes.
-if (typeof window.ethereum !== 'undefined') {
-    window.ethereum.on?.('accountsChanged', async (accounts) => {
-        userAddress = accounts && accounts[0] ? ethers.utils.getAddress(accounts[0]) : null;
-        balanceWei = null;
+    window.ethereum.on?.('accountsChanged', async accounts => {
+        closeConfirmation();
+        userAddress = accounts?.length ? ethers.utils.getAddress(accounts[0]) : null;
+        provider = userAddress ? new ethers.providers.Web3Provider(window.ethereum, 'any') : null;
         await refreshBalance();
     });
-    window.ethereum.on?.('chainChanged', () => window.location.reload());
+    window.ethereum.on?.('chainChanged', async () => {
+        closeConfirmation();
+        balanceWei = null;
+        ui.balLabel.textContent = '—';
+        const chain = await window.ethereum.request({ method: 'eth_chainId' });
+        if (String(chain).toLowerCase() === BSC_CHAIN_ID && userAddress) {
+            provider = new ethers.providers.Web3Provider(window.ethereum, 'any');
+            await refreshBalance();
+        }
+    });
 }
+boot();
