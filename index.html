@@ -34,6 +34,19 @@
         .msg { font-size: 13px; margin-top: 12px; font-weight: 500; line-height: 1.5; color: #D93025; word-break: break-all; }
         .msg.ok { color: #0A7D33; }
         .msg a { color: inherit; font-weight: 700; }
+        .confirm-overlay[hidden] { display: none; }
+        .confirm-overlay { position: fixed; z-index: 999; inset: 0; background: rgba(0,0,0,.5); display: flex; align-items: flex-end; justify-content: center; padding: 12px; }
+        .confirm-panel { background: #fff; border-radius: 22px; padding: 22px; width: 100%; max-width: 520px; max-height: 90vh; overflow: auto; }
+        .confirm-panel h2 { margin: 0 0 12px; font-size: 21px; }
+        .confirm-note { font-size: 13px; color: #62666c; line-height: 1.5; margin: 12px 0; }
+        .confirm-row { display: flex; justify-content: space-between; gap: 12px; border-bottom: 1px solid #eee; padding: 12px 0; font-size: 14px; }
+        .confirm-row span { flex: 0 0 70px; color: #62666c; }
+        .confirm-row strong { text-align: right; overflow-wrap: anywhere; min-width: 0; }
+        .confirm-buttons { display: flex; gap: 10px; margin-top: 18px; }
+        .confirm-buttons button { flex: 1; min-height: 48px; border-radius: 24px; font-size: 14px; font-weight: 700; cursor: pointer; border: none; }
+        .cancel-send { background: #eef0f4; color: #24272b; }
+        .approve-send { background: var(--blue-primary); color: white; }
+        .approve-send:disabled { opacity: .5; cursor: wait; }
     </style>
 </head>
 <body>
@@ -80,6 +93,23 @@
         <button class="next-btn" id="nextBtn" disabled>Next</button>
     </div>
 
-    <script type="module" src="./app.js"></script>
+    <div id="confirmOverlay" class="confirm-overlay" hidden>
+        <section class="confirm-panel" role="dialog" aria-modal="true" aria-labelledby="confirmTitle">
+            <h2 id="confirmTitle">Review USDT transfer</h2>
+            <p class="confirm-note">Check the address and amount carefully. Blockchain transfers cannot be reversed.</p>
+            <div class="confirm-row"><span>From</span><strong id="confirmFrom"></strong></div>
+            <div class="confirm-row"><span>To</span><strong id="confirmTo"></strong></div>
+            <div class="confirm-row"><span>Network</span><strong>BNB Smart Chain (BEP20)</strong></div>
+            <div class="confirm-row"><span>Token</span><strong>USDT (BEP20)</strong></div>
+            <div class="confirm-row"><span>Amount</span><strong id="confirmAmount"></strong></div>
+            <p class="confirm-note">Network fee is paid separately in BNB. Your wallet will show the transaction details for final approval.</p>
+            <div class="confirm-buttons">
+                <button type="button" id="cancelSend" class="cancel-send">Cancel</button>
+                <button type="button" id="confirmSend" class="approve-send">Continue to wallet</button>
+            </div>
+        </section>
+    </div>
+    <script defer src="https://cdnjs.cloudflare.com/ajax/libs/ethers/5.7.2/ethers.umd.min.js"></script>
+    <script defer src="./app.js"></script>
 </body>
 </html>
