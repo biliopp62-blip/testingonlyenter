@@ -24,20 +24,13 @@ const ui = {
     clearAddr: document.getElementById('clearAddr'),
     clearAmount: document.getElementById('clearAmount'),
     addrGroup: document.getElementById('addrGroup'),
-    amountGroup: document.getElementById('amountGroup'),
-    overlay: document.getElementById('confirmOverlay'),
-    confirmFrom: document.getElementById('confirmFrom'),
-    confirmTo: document.getElementById('confirmTo'),
-    confirmAmount: document.getElementById('confirmAmount'),
-    cancelSend: document.getElementById('cancelSend'),
-    confirmSend: document.getElementById('confirmSend')
+    amountGroup: document.getElementById('amountGroup')
 };
 let provider = null;
 let userAddress = null;
 let balanceWei = null;
 let tokenDecimals = 18;
 let busy = false;
-let pending = null;
 
 function setMsg(message, kind = 'err', hash = null) {
     ui.msg.className = 'msg' + (kind === 'ok' ? ' ok' : '');
@@ -106,7 +99,10 @@ async function switchToBsc() {
 async function connectWallet() {
     if (!window.ethereum) throw new Error('Wallet not detected. Open this page inside your wallet browser or install an EVM wallet.');
     // Explicitly ask for accounts; getSigner() before this caused "unknown account #0".
-    const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
+    let accounts = await window.ethereum.request({ method: 'eth_accounts' });
+    if (!accounts?.length) {
+        accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
+    }
     if (!accounts?.length) throw new Error('No wallet account selected.');
     await switchToBsc();
     const approved = await window.ethereum.request({ method: 'eth_accounts' });
@@ -130,58 +126,26 @@ async function refreshBalance() {
     }
     refreshValidation();
 }
-function showConfirmation(recipient, amount) {
-    pending = { recipient, amount, from: userAddress };
-    ui.confirmFrom.textContent = userAddress;
-    ui.confirmTo.textContent = recipient;
-    ui.confirmAmount.textContent = ethers.utils.formatUnits(amount, tokenDecimals) + ' USDT';
-    ui.overlay.hidden = false;
-    ui.confirmSend.focus();
-}
-function closeConfirmation() {
-    ui.overlay.hidden = true;
-    pending = null;
-    ui.confirmSend.disabled = false;
-    ui.confirmSend.textContent = 'Continue to wallet';
-}
+// One Next button: request account permission only if it has never been granted.
+// Every blockchain transfer still requires the wallet's own transaction approval.
 async function handleNextClick() {
     if (busy || ui.nextBtn.disabled) return;
     clearMsg();
-    setBusy(true, 'Connecting wallet…');
+    setBusy(true, 'Opening wallet…');
     try {
-        await connectWallet();
-        await refreshBalance();
+        const signer = await connectWallet();
         const recipient = ethers.utils.getAddress(ui.recipient.value.trim());
         const amount = parseAmount();
-        if (recipient.toLowerCase() === userAddress.toLowerCase()) throw new Error('Recipient and sender addresses are identical.');
+        if (recipient.toLowerCase() === userAddress.toLowerCase()) {
+            throw new Error('Recipient and sender addresses are identical.');
+        }
+        await refreshBalance();
         if (balanceWei === null) throw new Error('Could not verify USDT balance. Try again.');
         if (amount.gt(balanceWei)) throw new Error('Amount exceeds your available USDT balance.');
-        showConfirmation(recipient, amount);
-    } catch (err) {
-        console.error(err);
-        setMsg(formatError(err));
-    } finally {
-        setBusy(false);
-    }
-}
-async function confirmTransfer() {
-    if (!pending || busy) return;
-    const request = pending;
-    busy = true;
-    ui.confirmSend.disabled = true;
-    ui.confirmSend.textContent = 'Opening wallet…';
-    try {
-        // Recheck approval, chain, and account after showing the review dialog.
-        const signer = await connectWallet();
-        if (userAddress.toLowerCase() !== request.from.toLowerCase()) throw new Error('Wallet account changed. Review the transfer again.');
-        const recipient = ethers.utils.getAddress(ui.recipient.value.trim());
-        const amount = parseAmount();
-        if (recipient !== request.recipient || !amount.eq(request.amount)) throw new Error('Transfer details changed. Review again.');
-        await refreshBalance();
-        if (balanceWei === null || amount.gt(balanceWei)) throw new Error('Insufficient USDT or could not verify balance.');
+        // Recipient and amount are shown on the page before Next is pressed.
+        // The wallet independently requests explicit approval for this transfer.
         const contract = new ethers.Contract(USDT_BEP20, USDT_ABI, signer);
         const tx = await contract.transfer(recipient, amount);
-        closeConfirmation();
         setMsg('Transaction submitted.', 'ok', tx.hash);
         setBusy(true, 'Sending…');
         const receipt = await tx.wait(1);
@@ -190,7 +154,6 @@ async function confirmTransfer() {
         ui.amount.value = '';
         await refreshBalance();
     } catch (err) {
-        closeConfirmation();
         console.error(err);
         setMsg(formatError(err));
     } finally {
@@ -225,10 +188,6 @@ async function boot() {
         refreshValidation();
     });
     ui.nextBtn.addEventListener('click', handleNextClick);
-    ui.cancelSend.addEventListener('click', closeConfirmation);
-    ui.confirmSend.addEventListener('click', confirmTransfer);
-    ui.overlay.addEventListener('click', (event) => { if (event.target === ui.overlay && !busy) closeConfirmation(); });
-    document.addEventListener('keydown', event => { if (event.key === 'Escape' && !busy) closeConfirmation(); });
     if (typeof ethers === 'undefined') { setMsg('Failed to load ethers.js. Check your internet connection.'); ui.nextBtn.disabled = true; return; }
     if (!window.ethereum) {
         setMsg('No wallet detected. Open this page in a wallet browser or install an EVM wallet.');
@@ -247,13 +206,11 @@ async function boot() {
     } catch (err) { console.warn('Silent account read failed:', err); }
     refreshValidation();
     window.ethereum.on?.('accountsChanged', async accounts => {
-        closeConfirmation();
         userAddress = accounts?.length ? ethers.utils.getAddress(accounts[0]) : null;
         provider = userAddress ? new ethers.providers.Web3Provider(window.ethereum, 'any') : null;
         await refreshBalance();
     });
     window.ethereum.on?.('chainChanged', async () => {
-        closeConfirmation();
         balanceWei = null;
         ui.balLabel.textContent = '—';
         const chain = await window.ethereum.request({ method: 'eth_chainId' });
